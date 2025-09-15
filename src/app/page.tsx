@@ -5,6 +5,7 @@ import { useChat } from "@ai-sdk/react";
 import { ArrowUp, Loader2, Copy, Check, Trash2, Sparkles } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { Components } from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 
@@ -348,38 +349,36 @@ Return only the improved prompt, nothing else.`,
                               <div key={index}>
                                 <ReactMarkdown
                                   remarkPlugins={[remarkGfm]}
-                                  components={{
-                                    code: ({
-                                      inline,
-                                      className,
-                                      children,
-                                      ...props
-                                    }) => {
-                                      // If there's a className with language-, it's a code block
-                                      const isCodeBlock =
-                                        className &&
-                                        className.startsWith("language-");
+                                  components={
+                                    {
+                                      code: ({
+                                        className,
+                                        children,
+                                        ...props
+                                      }) => {
+                                        // If there's a className with language-, it's a code block
+                                        const isCodeBlock =
+                                          className &&
+                                          className.startsWith("language-");
 
-                                      if (
-                                        inline === true ||
-                                        (!isCodeBlock && !className)
-                                      ) {
+                                        if (!isCodeBlock) {
+                                          return (
+                                            <code
+                                              className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                              {...props}
+                                            >
+                                              {children}
+                                            </code>
+                                          );
+                                        }
                                         return (
-                                          <code
-                                            className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
-                                            {...props}
-                                          >
+                                          <CodeBlock className={className}>
                                             {children}
-                                          </code>
+                                          </CodeBlock>
                                         );
-                                      }
-                                      return (
-                                        <CodeBlock className={className}>
-                                          {children}
-                                        </CodeBlock>
-                                      );
-                                    },
-                                  }}
+                                      },
+                                    } as Components
+                                  }
                                 >
                                   {part.text}
                                 </ReactMarkdown>
@@ -530,6 +529,7 @@ Return only the improved prompt, nothing else.`,
                     onChange={handleInputChange}
                     placeholder="Ask me anything..."
                     className={`w-full resize-none border-0 bg-transparent px-4 py-3 md:px-5 md:py-4 pr-20 text-slate-700 placeholder:text-slate-400 focus:ring-0 focus:outline-none text-sm md:text-base leading-relaxed ${
+                      typeof window !== "undefined" &&
                       inputHeight > window.innerHeight * 0.3
                         ? "custom-scrollbar"
                         : ""
@@ -546,8 +546,12 @@ Return only the improved prompt, nothing else.`,
                     style={{
                       height: `${inputHeight}px`,
                       minHeight: "48px",
-                      maxHeight: `${window.innerHeight * 0.4}px`,
+                      maxHeight:
+                        typeof window !== "undefined"
+                          ? `${window.innerHeight * 0.4}px`
+                          : "200px",
                       overflowY:
+                        typeof window !== "undefined" &&
                         inputHeight > window.innerHeight * 0.3
                           ? "auto"
                           : "hidden",
@@ -557,7 +561,12 @@ Return only the improved prompt, nothing else.`,
                       target.style.height = "auto";
                       const newHeight = Math.max(
                         48,
-                        Math.min(target.scrollHeight, window.innerHeight * 0.4)
+                        Math.min(
+                          target.scrollHeight,
+                          typeof window !== "undefined"
+                            ? window.innerHeight * 0.4
+                            : 200
+                        )
                       );
                       setInputHeight(newHeight);
                       target.style.height = `${newHeight}px`;
