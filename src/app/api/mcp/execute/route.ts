@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { MCPToolCall } from '@/types/mcp';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { ChildProcess } from 'child_process';
-
-// Store active MCP connections (shared with test-connection)
-const activeConnections = new Map<string, { client: Client; process: ChildProcess | null }>();
+import { mcpConnectionManager } from '@/lib/mcp-connections';
 
 export async function POST(request: NextRequest) {
     try {
@@ -18,7 +14,7 @@ export async function POST(request: NextRequest) {
         }
 
         // Get the active connection for this server
-        const connection = activeConnections.get(serverId);
+        const connection = mcpConnectionManager.getConnection(serverId);
 
         if (!connection) {
             // No active connection found - user needs to test connection first
@@ -34,6 +30,15 @@ export async function POST(request: NextRequest) {
                 name: toolName,
                 arguments: toolArgs
             });
+
+            // Log the raw result for debugging
+            console.log('=== MCP TOOL EXECUTION DEBUG ===');
+            console.log('Tool name:', toolName);
+            console.log('Server ID:', serverId);
+            console.log('Raw result:', JSON.stringify(result, null, 2));
+            console.log('Result content:', JSON.stringify(result.content, null, 2));
+            console.log('Result type:', typeof result);
+            console.log('Content type:', typeof result.content);
 
             return NextResponse.json({
                 success: true,
@@ -51,7 +56,7 @@ export async function POST(request: NextRequest) {
                 toolError.message.includes('closed') ||
                 toolError.message.includes('disconnected')
             )) {
-                activeConnections.delete(serverId);
+                mcpConnectionManager.deleteConnection(serverId);
             }
 
             return NextResponse.json(

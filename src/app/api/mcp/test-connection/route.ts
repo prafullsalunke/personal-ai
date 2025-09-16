@@ -4,9 +4,8 @@ import { ChildProcess } from 'child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-
-// Store active MCP connections
-const activeConnections = new Map<string, { client: Client; process: ChildProcess | null }>();
+import { mcpConnectionManager } from '@/lib/mcp-connections';
+import { MCPDatabase } from '@/lib/database';
 
 export async function POST(request: NextRequest) {
     try {
@@ -22,18 +21,7 @@ export async function POST(request: NextRequest) {
                 }
 
                 // Clean up any existing connection for this server
-                const existingConnection = activeConnections.get(server.id);
-                if (existingConnection) {
-                    try {
-                        existingConnection.client.close();
-                        if (existingConnection.process) {
-                            existingConnection.process.kill();
-                        }
-                    } catch (cleanupError) {
-                        console.warn('Error cleaning up existing SSE connection:', cleanupError);
-                    }
-                    activeConnections.delete(server.id);
-                }
+                mcpConnectionManager.deleteConnection(server.id);
 
                 const transport = new SSEClientTransport(
                     new URL(server.config.url),
@@ -55,18 +43,25 @@ export async function POST(request: NextRequest) {
                 );
 
                 await Promise.race([connectPromise, timeoutPromise]);
+                console.log(`SSE connection successful for server ${server.id}`);
 
                 const toolsResult = await client.listTools();
+                console.log(`Found ${toolsResult.tools?.length || 0} tools for server ${server.id}`);
 
                 // For SSE, we don't have a process to manage, so we'll store just the client
-                // We'll need to update our connection storage to handle SSE differently
-                activeConnections.set(server.id, { client, process: null });
+                mcpConnectionManager.setConnection(server.id, client, null);
+                console.log(`SSE connection stored for server ${server.id}`);
 
                 const tools: MCPTool[] = (toolsResult.tools || []).map((tool: { name: string; description?: string; inputSchema?: unknown }) => ({
                     name: tool.name,
                     description: tool.description || '',
                     inputSchema: (tool.inputSchema as Record<string, unknown>) || { type: 'object', properties: {}, required: [] }
                 }));
+
+                // Save server and tools to database
+                const serverWithStatus = { ...server, status: 'connected' as const };
+                MCPDatabase.saveServer(serverWithStatus);
+                MCPDatabase.saveTools(server.id, tools);
 
                 return NextResponse.json({
                     success: true,
@@ -84,18 +79,7 @@ export async function POST(request: NextRequest) {
             // For STDIO servers, start the process and communicate via MCP protocol
             try {
                 // Clean up any existing connection for this server
-                const existingConnection = activeConnections.get(server.id);
-                if (existingConnection) {
-                    try {
-                        existingConnection.client.close();
-                        if (existingConnection.process) {
-                            existingConnection.process.kill();
-                        }
-                    } catch (cleanupError) {
-                        console.warn('Error cleaning up existing connection:', cleanupError);
-                    }
-                    activeConnections.delete(server.id);
-                }
+                mcpConnectionManager.deleteConnection(server.id);
 
                 // Create MCP client with stdio transport
                 const transport = new StdioClientTransport({
@@ -131,7 +115,7 @@ export async function POST(request: NextRequest) {
                 const process = (transport as unknown as { process: ChildProcess }).process;
 
                 // Store the connection for later use
-                activeConnections.set(server.id, { client, process });
+                mcpConnectionManager.setConnection(server.id, client, process);
 
                 const tools: MCPTool[] = (toolsResult.tools || []).map((tool: { name: string; description?: string; inputSchema?: unknown }) => ({
                     name: tool.name,
@@ -142,6 +126,11 @@ export async function POST(request: NextRequest) {
                         required: []
                     }
                 }));
+
+                // Save server and tools to database
+                const serverWithStatus = { ...server, status: 'connected' as const };
+                MCPDatabase.saveServer(serverWithStatus);
+                MCPDatabase.saveTools(server.id, tools);
 
                 return NextResponse.json({
                     success: true,

@@ -42,28 +42,54 @@ export function MCPConfig({
     status: "disconnected",
   });
 
-  // Load servers from localStorage on mount
+  // Load servers from backend on mount
   useEffect(() => {
-    const savedServers = localStorage.getItem("mcp-servers");
-    if (savedServers) {
+    const loadServers = async () => {
       try {
-        const parsed = JSON.parse(savedServers);
-        setServers(parsed);
-        onServersChange(parsed);
-      } catch {
-        console.error("Failed to load MCP servers");
+        const response = await fetch("/api/mcp/servers");
+        if (response.ok) {
+          const data = await response.json();
+          setServers(data.servers || []);
+          onServersChange(data.servers || []);
+        } else {
+          console.error("Failed to load MCP servers from backend");
+        }
+      } catch (error) {
+        console.error("Error loading MCP servers:", error);
       }
-    }
+    };
+
+    loadServers();
   }, [onServersChange]);
 
-  // Save servers to localStorage when they change
+  // Notify parent when servers change
   useEffect(() => {
-    localStorage.setItem("mcp-servers", JSON.stringify(servers));
     onServersChange(servers);
   }, [servers, onServersChange]);
 
 
-  const addServer = useCallback(() => {
+  const saveServerToDatabase = useCallback(async (server: MCPServer) => {
+    try {
+      const response = await fetch("/api/mcp/save-server", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(server),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: "Unknown error" }));
+        console.error("Save server error:", errorData);
+        throw new Error(errorData.error || "Failed to save server");
+      }
+
+      return true;
+    } catch (error) {
+      console.error("Save server error:", error);
+      throw error;
+    }
+  }, []);
+
+  const addServer = useCallback(async () => {
     const transport = newServer.config?.transport || "stdio";
     const isValid =
       transport === "stdio"
@@ -88,22 +114,27 @@ export function MCPConfig({
       tools: [],
     };
 
-    setServers((prev) => [...prev, server]);
-    setNewServer({
-      name: "",
-      config: {
-        command: "",
-        args: [],
-        env: {},
-        url: "",
-        headers: {},
-        transport: "stdio",
-      },
-      enabled: true,
-      status: "disconnected",
-    });
-    setShowAddForm(false);
-  }, [newServer]);
+    try {
+      await saveServerToDatabase(server);
+      setServers((prev) => [...prev, server]);
+      setNewServer({
+        name: "",
+        config: {
+          command: "",
+          args: [],
+          env: {},
+          url: "",
+          headers: {},
+          transport: "stdio",
+        },
+        enabled: true,
+        status: "disconnected",
+      });
+      setShowAddForm(false);
+    } catch (error) {
+      alert("Failed to save server configuration: " + (error instanceof Error ? error.message : "Unknown error"));
+    }
+  }, [newServer, saveServerToDatabase]);
 
   const updateServer = useCallback(
     (id: string, updates: Partial<MCPServer>) => {
@@ -111,20 +142,42 @@ export function MCPConfig({
         const updated = prev.map((server) =>
           server.id === id ? { ...server, ...updates } : server
         );
-        
-        // Update editingServer state if we're currently editing this server
-        if (editingServer && editingServer.id === id) {
-          setEditingServer(updated.find(server => server.id === id) || null);
-        }
-        
+
         return updated;
       });
+    },
+    []
+  );
+
+  // Separate function to update editing state without affecting the main servers list
+  const updateEditingServer = useCallback(
+    (updates: Partial<MCPServer>) => {
+      if (editingServer) {
+        setEditingServer((prev) => prev ? { ...prev, ...updates } : null);
+      }
     },
     [editingServer]
   );
 
-  const deleteServer = useCallback((id: string) => {
-    setServers((prev) => prev.filter((server) => server.id !== id));
+  const deleteServer = useCallback(async (id: string) => {
+    try {
+      const response = await fetch("/api/mcp/delete-server", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ serverId: id }),
+      });
+
+      if (response.ok) {
+        setServers((prev) => prev.filter((server) => server.id !== id));
+      } else {
+        const errorData = await response.json().catch(() => ({ error: "Unknown error" }));
+        console.error("Delete server error:", errorData);
+        alert("Failed to delete server: " + (errorData.error || "Unknown error"));
+      }
+    } catch (error) {
+      console.error("Delete server error:", error);
+      alert("Failed to delete server: " + (error instanceof Error ? error.message : "Unknown error"));
+    }
   }, []);
 
   const testConnection = useCallback(
@@ -265,7 +318,7 @@ export function MCPConfig({
                 onChange={(e) => {
                   const value = e.target.value;
                   if (editingServer) {
-                    updateServer(editingServer.id, { name: value });
+                    updateEditingServer({ name: value });
                   } else {
                     setNewServer((prev) => ({ ...prev, name: value }));
                   }
@@ -288,7 +341,7 @@ export function MCPConfig({
                 onChange={(e) => {
                   const value = e.target.value as "stdio" | "sse";
                   if (editingServer) {
-                    updateServer(editingServer.id, {
+                    updateEditingServer({
                       config: { ...editingServer.config, transport: value },
                     });
                   } else {
@@ -327,7 +380,7 @@ export function MCPConfig({
                     onChange={(e) => {
                       const value = e.target.value;
                       if (editingServer) {
-                        updateServer(editingServer.id, {
+                        updateEditingServer({
                           config: { ...editingServer.config, command: value },
                         });
                       } else {
@@ -338,7 +391,70 @@ export function MCPConfig({
                       }
                     }}
                     placeholder="/Users/prafull/.nvm/versions/node/v20.17.0/bin/bun"
-                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Arguments (comma-separated)
+                  </label>
+                  <input
+                    type="text"
+                    value={
+                      editingServer?.config?.args?.join(", ") ||
+                      newServer.config?.args?.join(", ") ||
+                      ""
+                    }
+                    onChange={(e) => {
+                      const value = e.target.value
+                        .split(",")
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+                      if (editingServer) {
+                        updateEditingServer({
+                          config: { ...editingServer.config, args: value },
+                        });
+                      } else {
+                        setNewServer((prev) => ({
+                          ...prev,
+                          config: { ...prev.config!, args: value },
+                        }));
+                      }
+                    }}
+                    placeholder="/Users/prafull/work/repos/zerodha/index.ts"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Environment Variables (JSON format)
+                  </label>
+                  <textarea
+                    value={JSON.stringify(
+                      editingServer?.config?.env || newServer.config?.env || {},
+                      null,
+                      2
+                    )}
+                    onChange={(e) => {
+                      try {
+                        const value = JSON.parse(e.target.value);
+                        if (editingServer) {
+                          updateEditingServer({
+                            config: { ...editingServer.config, env: value },
+                          });
+                        } else {
+                          setNewServer((prev) => ({
+                            ...prev,
+                            config: { ...prev.config!, env: value },
+                          }));
+                        }
+                      } catch {
+                        // Invalid JSON, ignore
+                      }
+                    }}
+                    placeholder='{"API_KEY": "your-api-key", "ACCESS_TOKEN": "your-token"}'
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                    rows={4}
                   />
                 </div>
               </>
@@ -361,7 +477,7 @@ export function MCPConfig({
                     onChange={(e) => {
                       const value = e.target.value;
                       if (editingServer) {
-                        updateServer(editingServer.id, {
+                        updateEditingServer({
                           config: { ...editingServer.config, url: value },
                         });
                       } else {
@@ -372,7 +488,7 @@ export function MCPConfig({
                       }
                     }}
                     placeholder="https://dev.gupshup.io/convomate-ai/sse"
-                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
                   />
                 </div>
                 <div>
@@ -391,7 +507,7 @@ export function MCPConfig({
                       try {
                         const value = JSON.parse(e.target.value);
                         if (editingServer) {
-                          updateServer(editingServer.id, {
+                          updateEditingServer({
                             config: { ...editingServer.config, headers: value },
                           });
                         } else {
@@ -405,70 +521,7 @@ export function MCPConfig({
                       }
                     }}
                     placeholder='{"Authorization": "Bearer your-token"}'
-                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    rows={4}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">
-                    Arguments (comma-separated)
-                  </label>
-                  <input
-                    type="text"
-                    value={
-                      editingServer?.config?.args?.join(", ") ||
-                      newServer.config?.args?.join(", ") ||
-                      ""
-                    }
-                    onChange={(e) => {
-                      const value = e.target.value
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter(Boolean);
-                      if (editingServer) {
-                        updateServer(editingServer.id, {
-                          config: { ...editingServer.config, args: value },
-                        });
-                      } else {
-                        setNewServer((prev) => ({
-                          ...prev,
-                          config: { ...prev.config!, args: value },
-                        }));
-                      }
-                    }}
-                    placeholder="/Users/prafull/work/repos/zerodha/index.ts"
-                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">
-                    Environment Variables (JSON format)
-                  </label>
-                  <textarea
-                    value={JSON.stringify(
-                      editingServer?.config?.env || newServer.config?.env || {},
-                      null,
-                      2
-                    )}
-                    onChange={(e) => {
-                      try {
-                        const value = JSON.parse(e.target.value);
-                        if (editingServer) {
-                          updateServer(editingServer.id, {
-                            config: { ...editingServer.config, env: value },
-                          });
-                        } else {
-                          setNewServer((prev) => ({
-                            ...prev,
-                            config: { ...prev.config!, env: value },
-                          }));
-                        }
-                      } catch {
-                        // Invalid JSON, ignore
-                      }
-                    }}
-                    placeholder='{"API_KEY": "your-api-key", "ACCESS_TOKEN": "your-token"}'
-                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
                     rows={4}
                   />
                 </div>
@@ -484,7 +537,7 @@ export function MCPConfig({
                 onChange={(e) => {
                   const value = e.target.checked;
                   if (editingServer) {
-                    updateServer(editingServer.id, { enabled: value });
+                    updateEditingServer({ enabled: value });
                   } else {
                     setNewServer((prev) => ({ ...prev, enabled: value }));
                   }
@@ -497,7 +550,17 @@ export function MCPConfig({
 
           <div className="flex gap-2">
             <button
-              onClick={editingServer ? () => setEditingServer(null) : addServer}
+              onClick={editingServer ? async () => {
+                try {
+                  await saveServerToDatabase(editingServer);
+                  setServers((prev) => prev.map(server =>
+                    server.id === editingServer.id ? editingServer : server
+                  ));
+                  setEditingServer(null);
+                } catch (error) {
+                  alert("Failed to save server configuration: " + (error instanceof Error ? error.message : "Unknown error"));
+                }
+              } : addServer}
               className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors"
             >
               {editingServer ? "Save Changes" : "Add Server"}

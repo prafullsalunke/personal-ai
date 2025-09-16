@@ -22,6 +22,7 @@ import { Confetti } from "@/components/confetti";
 import { ToastContainer, useToast } from "@/components/toast";
 import { MCPConfig } from "@/components/mcp-config";
 import { MCPServer } from "@/types/mcp";
+import { TypingIndicator, ButtonTypingIndicator } from "@/components/skeleton-loader";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -115,21 +116,23 @@ export default function Page() {
   const [fadeInText, setFadeInText] = useState(false);
   const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
   const [showMCPConfig, setShowMCPConfig] = useState(false);
+  const [mcpConfigLoading, setMcpConfigLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { toasts, removeToast, error: showError } = useToast();
 
   const refreshMCPConnections = useCallback(async () => {
-    // Load servers from localStorage and refresh their connections
-    const savedServers = localStorage.getItem("mcp-servers");
-    if (savedServers) {
-      try {
-        const parsed = JSON.parse(savedServers);
-        setMcpServers(parsed);
+    // Load servers from backend and refresh their connections
+    try {
+      const response = await fetch("/api/mcp/servers");
+      if (response.ok) {
+        const data = await response.json();
+        const servers = data.servers || [];
+        setMcpServers(servers);
 
         // Refresh all enabled servers
-        const enabledServers = parsed.filter(
+        const enabledServers = servers.filter(
           (server: MCPServer) => server.enabled
         );
         const refreshPromises = enabledServers.map(
@@ -160,14 +163,28 @@ export default function Page() {
 
         const updatedServers = await Promise.allSettled(refreshPromises);
         const newServers = updatedServers.map((result, index) =>
-          result.status === "fulfilled" ? result.value : parsed[index]
+          result.status === "fulfilled" ? result.value : servers[index]
         );
 
         setMcpServers(newServers);
-        localStorage.setItem("mcp-servers", JSON.stringify(newServers));
-      } catch (error) {
-        console.error("Failed to refresh MCP connections:", error);
+
+        // Update the database with the new connection statuses
+        for (const server of newServers) {
+          try {
+            await fetch("/api/mcp/save-server", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(server),
+            });
+          } catch (error) {
+            console.warn("Failed to save server status for", server.name, error);
+          }
+        }
+      } else {
+        console.error("Failed to load servers from backend");
       }
+    } catch (error) {
+      console.error("Failed to refresh MCP connections:", error);
     }
   }, []);
 
@@ -323,7 +340,7 @@ export default function Page() {
     if (status === "ready" && messageQueue.length > 0) {
       const nextMessage = messageQueue[0];
       setMessageQueue((prev) => prev.slice(1));
-      sendMessage({ text: nextMessage.text });
+      (sendMessage as unknown as (message: string) => void)(nextMessage.text);
     }
   }, [status, messageQueue, sendMessage]);
 
@@ -351,7 +368,7 @@ export default function Page() {
 
       if (status === "ready") {
         // Send immediately if AI is ready
-        sendMessage({ text: messageText });
+        (sendMessage as unknown as (message: string) => void)(messageText);
       } else {
         // Add to queue if AI is busy
         const queuedMessage: QueuedMessage = {
@@ -463,8 +480,207 @@ export default function Page() {
                       );
                     }
 
+                    // tool call parts (legacy format):
+                    if (part.type === "tool-call") {
+                      return (
+                        <div key={index}>
+                          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 my-4">
+                            <div className="flex items-center gap-2 mb-2">
+                              <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                              <span className="text-sm font-medium text-blue-800">Tool: {(part as { toolName?: string }).toolName || 'Unknown'}</span>
+                            </div>
+                            {(part as { result?: string | object }).result && (
+                              <div className="mt-3">
+                                {typeof (part as { result?: string | object }).result === 'string' ? (
+                                  <ReactMarkdown
+                                    remarkPlugins={[remarkGfm]}
+                                    components={
+                                      {
+                                        code: ({ className, children, ...props }) => {
+                                          const isCodeBlock = className && className.startsWith("language-");
+                                          if (!isCodeBlock) {
+                                            return (
+                                              <code
+                                                className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                                {...props}
+                                              >
+                                                {children}
+                                              </code>
+                                            );
+                                          }
+                                          return (
+                                            <CodeBlock className={className}>
+                                              {children}
+                                            </CodeBlock>
+                                          );
+                                        },
+                                      } as Components
+                                    }
+                                  >
+                                    {String((part as { result?: string | object }).result)}
+                                  </ReactMarkdown>
+                                ) : (
+                                  <div>
+                                    {typeof (part as { result?: string | object }).result === 'object' ? (
+                                      <pre className="text-xs text-blue-700 overflow-x-auto whitespace-pre-wrap bg-blue-25 p-2 rounded">
+                                        {JSON.stringify((part as { result?: string | object }).result, null, 2)}
+                                      </pre>
+                                    ) : (
+                                      <ReactMarkdown
+                                        remarkPlugins={[remarkGfm]}
+                                        components={
+                                          {
+                                            code: ({ className, children, ...props }) => {
+                                              const isCodeBlock = className && className.startsWith("language-");
+                                              if (!isCodeBlock) {
+                                                return (
+                                                  <code
+                                                    className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                                    {...props}
+                                                  >
+                                                    {children}
+                                                  </code>
+                                                );
+                                              }
+                                              return (
+                                                <CodeBlock className={className}>
+                                                  {children}
+                                                </CodeBlock>
+                                              );
+                                            },
+                                          } as Components
+                                        }
+                                      >
+                                        {String((part as { result?: string | object }).result)}
+                                      </ReactMarkdown>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          {/* Gradient separator bar */}
+                          {index < (message.parts?.length || 1) - 1 && (
+                            <div className="my-6 h-px bg-gradient-to-r from-transparent via-slate-300 to-transparent"></div>
+                          )}
+                        </div>
+                      );
+                    }
+
+                    // Handle new AI SDK tool format (tool-{toolName}):
+                    if (part.type && part.type.startsWith("tool-")) {
+                      // Extract text content from tool output
+                      let textContent = '';
+
+                      if (typeof (part as { output?: unknown }).output === 'string') {
+                        textContent = (part as { output?: string }).output || '';
+                      } else if (Array.isArray((part as { output?: unknown }).output)) {
+                        // Handle array format like [{"type": "text", "text": "..."}]
+                        textContent = ((part as { output?: Array<{ type: string; text?: string }> }).output || [])
+                          .filter(item => item && typeof item === 'object' && item.type === 'text')
+                          .map(item => item.text || '')
+                          .join('');
+                      } else if ((part as { output?: unknown }).output && typeof (part as { output?: unknown }).output === 'object' && 'text' in ((part as { output?: { text?: string } }).output || {})) {
+                        // Handle single object format like {"type": "text", "text": "..."}
+                        textContent = String((part as { output?: { text?: string } }).output?.text || '');
+                      } else if ((part as { output?: unknown }).output && typeof (part as { output?: unknown }).output === 'object') {
+                        // Handle raw object output - convert to readable format
+                        try {
+                          textContent = JSON.stringify((part as { output?: unknown }).output, null, 2);
+                        } catch {
+                          textContent = String((part as { output?: unknown }).output);
+                        }
+                      }
+
+                      return (
+                        <div key={index}>
+                          {textContent ? (
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={
+                                {
+                                  code: ({ className, children, ...props }) => {
+                                    const isCodeBlock = className && className.startsWith("language-");
+                                    if (!isCodeBlock) {
+                                      return (
+                                        <code
+                                          className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                          {...props}
+                                        >
+                                          {children}
+                                        </code>
+                                      );
+                                    }
+                                    return (
+                                      <CodeBlock className={className}>
+                                        {children}
+                                      </CodeBlock>
+                                    );
+                                  },
+                                } as Components
+                              }
+                            >
+                              {textContent}
+                            </ReactMarkdown>
+                          ) : (
+                            <pre className="text-xs text-slate-700 overflow-x-auto whitespace-pre-wrap bg-slate-50 p-2 rounded">
+                              {JSON.stringify((part as { output?: unknown }).output, null, 2)}
+                            </pre>
+                          )}
+                          {/* Gradient separator bar */}
+                          {index < (message.parts?.length || 1) - 1 && (
+                            <div className="my-6 h-px bg-gradient-to-r from-transparent via-slate-300 to-transparent"></div>
+                          )}
+                        </div>
+                      );
+                    }
+
+                    // Skip step-start and other control parts silently
+                    if (part.type === "step-start") {
+                      return null;
+                    }
+
+                    // Log truly unhandled parts for debugging, but don't render them
+                    console.log("Unhandled message part:", part);
                     return null;
                   })}
+
+                  {/* Fallback for messages without parts or with empty parts */}
+                  {(!message.parts || message.parts.length === 0) && (message as { content?: string | object }).content && (
+                    <div>
+                      {typeof (message as { content?: string | object }).content === 'string' ? (
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={
+                            {
+                              code: ({ className, children, ...props }) => {
+                                const isCodeBlock = className && className.startsWith("language-");
+                                if (!isCodeBlock) {
+                                  return (
+                                    <code
+                                      className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                      {...props}
+                                    >
+                                      {children}
+                                    </code>
+                                  );
+                                }
+                                return (
+                                  <CodeBlock className={className}>
+                                    {children}
+                                  </CodeBlock>
+                                );
+                              },
+                            } as Components
+                          }
+                        >
+                          {String((message as { content?: string | object }).content)}
+                        </ReactMarkdown>
+                      ) : (
+                        <p>{String((message as { content?: string | object }).content)}</p>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -536,11 +752,20 @@ export default function Page() {
               <button
                 onClick={async () => {
                   if (!showMCPConfig) {
+                    // Open immediately and show loading
+                    setShowMCPConfig(true);
+                    setMcpConfigLoading(true);
                     await refreshMCPConnections();
+                    setMcpConfigLoading(false);
+                  } else {
+                    setShowMCPConfig(false);
                   }
-                  setShowMCPConfig(!showMCPConfig);
                 }}
-                className="p-2 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all duration-200 cursor-pointer hover:scale-105 active:scale-95"
+                className={`p-2 rounded-lg transition-all duration-200 cursor-pointer hover:scale-105 active:scale-95 ${
+                  showMCPConfig
+                    ? "text-blue-600 bg-blue-100 hover:text-blue-700 hover:bg-blue-200"
+                    : "text-slate-500 hover:text-slate-700 hover:bg-slate-100"
+                }`}
                 title="MCP Settings & Refresh"
               >
                 <Settings className="w-5 h-5" />
@@ -562,10 +787,50 @@ export default function Page() {
         {showMCPConfig && (
           <div className="border-b border-slate-200 px-4 py-4 md:px-6 md:py-5 bg-slate-50">
             <div className="max-w-4xl mx-auto">
-              <MCPConfig
-                onServersChange={handleMCPServersChange}
-                initialServers={mcpServers}
-              />
+              {mcpConfigLoading ? (
+                <div className="space-y-4">
+                  {/* Header skeleton */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-5 h-5 bg-slate-300 rounded animate-pulse"></div>
+                      <div className="h-6 w-32 bg-slate-300 rounded animate-pulse"></div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="h-10 w-20 bg-slate-300 rounded-lg animate-pulse"></div>
+                      <div className="h-10 w-28 bg-slate-300 rounded-lg animate-pulse"></div>
+                    </div>
+                  </div>
+
+                  {/* Server list skeleton */}
+                  <div className="space-y-3">
+                    {Array.from({ length: 3 }).map((_, index) => (
+                      <div key={index} className="border rounded-lg p-4 bg-white">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="w-5 h-5 bg-slate-300 rounded animate-pulse"></div>
+                            <div className="space-y-2">
+                              <div className="h-4 w-24 bg-slate-300 rounded animate-pulse"></div>
+                              <div className="h-3 w-48 bg-slate-200 rounded animate-pulse"></div>
+                              <div className="h-3 w-32 bg-slate-200 rounded animate-pulse"></div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 bg-slate-300 rounded-full animate-pulse"></div>
+                            <div className="w-8 h-8 bg-slate-300 rounded animate-pulse"></div>
+                            <div className="w-8 h-8 bg-slate-300 rounded animate-pulse"></div>
+                            <div className="w-8 h-8 bg-slate-300 rounded animate-pulse"></div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <MCPConfig
+                  onServersChange={handleMCPServersChange}
+                  initialServers={mcpServers}
+                />
+              )}
             </div>
           </div>
         )}
@@ -623,33 +888,10 @@ export default function Page() {
                 </div>
               )}
 
-              {/* Loading Indicator */}
+              {/* Modern Skeleton Loading */}
               {status !== "ready" && !error && (
                 <div className="px-4 py-6 md:px-6 md:py-8 bg-slate-50/80">
-                  <div className="flex gap-4 md:gap-6">
-                    <div className="flex-shrink-0">
-                      <div className="w-8 h-8 md:w-9 md:h-9 bg-gradient-to-br from-emerald-400 to-cyan-500 rounded-full flex items-center justify-center shadow-lg border-2 border-white/20 relative overflow-hidden">
-                        <div className="absolute inset-0 bg-gradient-to-br from-emerald-300/30 to-cyan-400/30 rounded-full animate-pulse"></div>
-                        <div className="w-2 h-2 md:w-2.5 md:h-2.5 bg-white rounded-full relative z-10"></div>
-                        <div className="absolute top-1 right-1 w-1 h-1 bg-white/60 rounded-full animate-pulse"></div>
-                      </div>
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <div className="flex items-center gap-1">
-                          <div className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce"></div>
-                          <div
-                            className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce"
-                            style={{ animationDelay: "0.1s" }}
-                          ></div>
-                          <div
-                            className="w-2 h-2 bg-emerald-500 rounded-full animate-bounce"
-                            style={{ animationDelay: "0.2s" }}
-                          ></div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+                  <TypingIndicator />
                 </div>
               )}
               <div ref={messagesEndRef} />
@@ -758,17 +1000,7 @@ export default function Page() {
                       }`}
                     >
                       {isUserTyping && input.trim() ? (
-                        <div className="flex items-center gap-0.5">
-                          <div className="w-1 h-1 bg-white rounded-full animate-bounce"></div>
-                          <div
-                            className="w-1 h-1 bg-white rounded-full animate-bounce"
-                            style={{ animationDelay: "0.1s" }}
-                          ></div>
-                          <div
-                            className="w-1 h-1 bg-white rounded-full animate-bounce"
-                            style={{ animationDelay: "0.2s" }}
-                          ></div>
-                        </div>
+                        <ButtonTypingIndicator />
                       ) : (
                         <ArrowUp
                           className={`w-4 h-4 transition-all duration-200 ${
