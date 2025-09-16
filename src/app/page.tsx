@@ -8,10 +8,20 @@ import React, {
   useMemo,
 } from "react";
 import { useChat } from "@ai-sdk/react";
-import { ArrowUp, Loader2, Copy, Check, Trash2, Sparkles } from "lucide-react";
+import {
+  ArrowUp,
+  Loader2,
+  Copy,
+  Check,
+  Trash2,
+  Sparkles,
+  Settings,
+} from "lucide-react";
 import { VoiceRecorder } from "@/components/voice-recorder";
 import { Confetti } from "@/components/confetti";
 import { ToastContainer, useToast } from "@/components/toast";
+import { MCPConfig } from "@/components/mcp-config";
+import { MCPServer } from "@/types/mcp";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -103,10 +113,63 @@ export default function Page() {
   const [showConfetti, setShowConfetti] = useState(false);
   const [isReplacingText, setIsReplacingText] = useState(false);
   const [fadeInText, setFadeInText] = useState(false);
+  const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
+  const [showMCPConfig, setShowMCPConfig] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { toasts, removeToast, error: showError } = useToast();
+
+  const refreshMCPConnections = useCallback(async () => {
+    // Load servers from localStorage and refresh their connections
+    const savedServers = localStorage.getItem("mcp-servers");
+    if (savedServers) {
+      try {
+        const parsed = JSON.parse(savedServers);
+        setMcpServers(parsed);
+
+        // Refresh all enabled servers
+        const enabledServers = parsed.filter(
+          (server: MCPServer) => server.enabled
+        );
+        const refreshPromises = enabledServers.map(
+          async (server: MCPServer) => {
+            try {
+              const response = await fetch("/api/mcp/test-connection", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(server),
+              });
+
+              if (response.ok) {
+                const data = await response.json();
+                return {
+                  ...server,
+                  status: "connected" as const,
+                  tools: data.tools,
+                  lastChecked: new Date(),
+                };
+              } else {
+                return { ...server, status: "error" as const };
+              }
+            } catch {
+              return { ...server, status: "error" as const };
+            }
+          }
+        );
+
+        const updatedServers = await Promise.allSettled(refreshPromises);
+        const newServers = updatedServers.map((result, index) =>
+          result.status === "fulfilled" ? result.value : parsed[index]
+        );
+
+        setMcpServers(newServers);
+        localStorage.setItem("mcp-servers", JSON.stringify(newServers));
+      } catch (error) {
+        console.error("Failed to refresh MCP connections:", error);
+      }
+    }
+  }, []);
 
   const clearConversation = useCallback(() => {
     setMessages([]);
@@ -217,6 +280,10 @@ export default function Page() {
     },
     [showError]
   );
+
+  const handleMCPServersChange = useCallback((servers: MCPServer[]) => {
+    setMcpServers(servers);
+  }, []);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -465,17 +532,43 @@ export default function Page() {
                 </p>
               )}
             </div>
-            {messages.length > 0 && (
+            <div className="flex items-center gap-2">
               <button
-                onClick={clearConversation}
+                onClick={async () => {
+                  if (!showMCPConfig) {
+                    await refreshMCPConnections();
+                  }
+                  setShowMCPConfig(!showMCPConfig);
+                }}
                 className="p-2 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all duration-200 cursor-pointer hover:scale-105 active:scale-95"
-                title="Clear conversation"
+                title="MCP Settings & Refresh"
               >
-                <Trash2 className="w-5 h-5" />
+                <Settings className="w-5 h-5" />
               </button>
-            )}
+              {messages.length > 0 && (
+                <button
+                  onClick={clearConversation}
+                  className="p-2 text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all duration-200 cursor-pointer hover:scale-105 active:scale-95"
+                  title="Clear conversation"
+                >
+                  <Trash2 className="w-5 h-5" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
+
+        {/* MCP Configuration Panel */}
+        {showMCPConfig && (
+          <div className="border-b border-slate-200 px-4 py-4 md:px-6 md:py-5 bg-slate-50">
+            <div className="max-w-4xl mx-auto">
+              <MCPConfig
+                onServersChange={handleMCPServersChange}
+                initialServers={mcpServers}
+              />
+            </div>
+          </div>
+        )}
 
         {/* Messages Container */}
         <div className="flex-1 overflow-y-auto">
