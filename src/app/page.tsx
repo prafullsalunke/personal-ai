@@ -16,24 +16,45 @@ import {
   Trash2,
   Sparkles,
   Settings,
+  ChevronDown,
 } from "lucide-react";
 import { VoiceRecorder } from "@/components/voice-recorder";
 import { Confetti } from "@/components/confetti";
 import { ToastContainer, useToast } from "@/components/toast";
 import { MCPConfig } from "@/components/mcp-config";
 import { MCPServer } from "@/types/mcp";
-import { TypingIndicator, ButtonTypingIndicator } from "@/components/skeleton-loader";
+import {
+  TypingIndicator,
+  ButtonTypingIndicator,
+} from "@/components/skeleton-loader";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import * as Accordion from "@radix-ui/react-accordion";
 
 interface QueuedMessage {
   id: string;
   text: string;
   timestamp: number;
 }
+
+interface MessagePart {
+  type: string;
+  text?: string;
+  toolName?: string;
+  result?: string | object;
+  output?: unknown;
+}
+
+interface UIMessageWithParts {
+  id: string;
+  role: string;
+  content?: string;
+  parts?: MessagePart[];
+}
+
 
 // Custom code block component with copy functionality
 interface CodeBlockProps {
@@ -102,7 +123,95 @@ const CodeBlock = ({ children, className }: CodeBlockProps) => {
 };
 
 export default function Page() {
-  const { messages, status, sendMessage, error, setMessages } = useChat();
+  const [useOpenAI, setUseOpenAI] = useState(false);
+
+  // AI SDK hook (only used when useOpenAI is false)
+  const aiSdkChat = useChat({
+    id: "ai-sdk-chat",
+  });
+
+  // Custom OpenAI state management
+  const [openAIMessages, setOpenAIMessages] = useState<
+    Array<{ id: string; role: string; content: string }>
+  >([]);
+  const [openAIStatus, setOpenAIStatus] = useState<"idle" | "loading">("idle");
+  const [openAIError, setOpenAIError] = useState<Error | undefined>();
+
+  // Custom OpenAI send function
+  const sendOpenAIMessage = useCallback(
+    async (message: { role: string; content: string }) => {
+      setOpenAIStatus("loading");
+      setOpenAIError(undefined);
+
+      // Add user message immediately
+      const userMessage = { ...message, id: `user-${Date.now()}` };
+      setOpenAIMessages((prev) => [...prev, userMessage]);
+
+      try {
+        const response = await fetch("/api/chat-openai", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: [...openAIMessages, userMessage] }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        let assistantContent = "";
+
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            // Parse AI SDK streaming format
+            const lines = chunk.split("\n").filter((line) => line.trim());
+            for (const line of lines) {
+              if (line.startsWith('0:"')) {
+                const content = line.slice(3, -1).replace(/\\"/g, '"');
+                assistantContent += content;
+              }
+            }
+          }
+        }
+
+        // Add assistant response
+        const assistantMessage = {
+          id: `assistant-${Date.now()}`,
+          role: "assistant",
+          content: assistantContent,
+        };
+        setOpenAIMessages((prev) => [...prev, assistantMessage]);
+      } catch (error) {
+        console.error("OpenAI API error:", error);
+        setOpenAIError(
+          error instanceof Error ? error : new Error("Unknown error")
+        );
+      } finally {
+        setOpenAIStatus("idle");
+      }
+    },
+    [openAIMessages]
+  );
+
+  // Conditional hook usage
+  const messages = useOpenAI ? openAIMessages : aiSdkChat.messages;
+  const status = useOpenAI ? openAIStatus : aiSdkChat.status;
+  const error = useOpenAI ? openAIError : aiSdkChat.error;
+  const setMessages = useOpenAI ? setOpenAIMessages : aiSdkChat.setMessages;
+
+  // Clear messages when switching APIs
+  useEffect(() => {
+    if (useOpenAI) {
+      setOpenAIMessages([]);
+    } else {
+      aiSdkChat.setMessages([]);
+    }
+  }, [useOpenAI, aiSdkChat]);
   const [input, setInput] = useState("");
   const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
@@ -177,7 +286,11 @@ export default function Page() {
               body: JSON.stringify(server),
             });
           } catch (error) {
-            console.warn("Failed to save server status for", server.name, error);
+            console.warn(
+              "Failed to save server status for",
+              server.name,
+              error
+            );
           }
         }
       } else {
@@ -340,9 +453,9 @@ export default function Page() {
     if (status === "ready" && messageQueue.length > 0) {
       const nextMessage = messageQueue[0];
       setMessageQueue((prev) => prev.slice(1));
-      (sendMessage as unknown as (message: string) => void)(nextMessage.text);
+      aiSdkChat.sendMessage({ text: nextMessage.text });
     }
-  }, [status, messageQueue, sendMessage]);
+  }, [status, messageQueue, aiSdkChat]);
 
   const handleSubmit = useCallback(
     (e: React.FormEvent<HTMLFormElement>) => {
@@ -368,7 +481,11 @@ export default function Page() {
 
       if (status === "ready") {
         // Send immediately if AI is ready
-        (sendMessage as unknown as (message: string) => void)(messageText);
+        if (useOpenAI) {
+          sendOpenAIMessage({ role: "user", content: messageText });
+        } else {
+          aiSdkChat.sendMessage({ text: messageText });
+        }
       } else {
         // Add to queue if AI is busy
         const queuedMessage: QueuedMessage = {
@@ -379,7 +496,7 @@ export default function Page() {
         setMessageQueue((prev) => [...prev, queuedMessage]);
       }
     },
-    [input, status, sendMessage]
+    [input, status, aiSdkChat, sendOpenAIMessage, useOpenAI]
   );
 
   // Memoize message rendering to prevent unnecessary re-renders
@@ -416,7 +533,7 @@ export default function Page() {
               </div>
               <div className="flex-1 min-w-0">
                 <div className="prose prose-slate max-w-none">
-                  {message.parts?.map((part, index) => {
+                  {(message as UIMessageWithParts).parts?.map((part: MessagePart, index: number) => {
                     // text parts:
                     if (part.type === "text") {
                       return (
@@ -453,7 +570,7 @@ export default function Page() {
                             {part.text}
                           </ReactMarkdown>
                           {/* Gradient separator bar */}
-                          {index < (message.parts?.length || 1) - 1 && (
+                          {index < ((message as UIMessageWithParts).parts?.length || 1) - 1 && (
                             <div className="my-6 h-px bg-gradient-to-r from-transparent via-slate-300 to-transparent"></div>
                           )}
                         </div>
@@ -473,7 +590,7 @@ export default function Page() {
                             </pre>
                           </details>
                           {/* Gradient separator bar */}
-                          {index < (message.parts?.length || 1) - 1 && (
+                          {index < ((message as UIMessageWithParts).parts?.length || 1) - 1 && (
                             <div className="my-6 h-px bg-gradient-to-r from-transparent via-slate-300 to-transparent"></div>
                           )}
                         </div>
@@ -482,85 +599,148 @@ export default function Page() {
 
                     // tool call parts (legacy format):
                     if (part.type === "tool-call") {
+                      const toolId = `${message.id}-legacy-tool-${index}`;
+                      const toolName =
+                        (part as { toolName?: string }).toolName || "Unknown";
+
                       return (
-                        <div key={index}>
-                          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 my-4">
-                            <div className="flex items-center gap-2 mb-2">
-                              <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-                              <span className="text-sm font-medium text-blue-800">Tool: {(part as { toolName?: string }).toolName || 'Unknown'}</span>
-                            </div>
-                            {(part as { result?: string | object }).result && (
-                              <div className="mt-3">
-                                {typeof (part as { result?: string | object }).result === 'string' ? (
-                                  <ReactMarkdown
-                                    remarkPlugins={[remarkGfm]}
-                                    components={
-                                      {
-                                        code: ({ className, children, ...props }) => {
-                                          const isCodeBlock = className && className.startsWith("language-");
-                                          if (!isCodeBlock) {
-                                            return (
-                                              <code
-                                                className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
-                                                {...props}
-                                              >
-                                                {children}
-                                              </code>
-                                            );
-                                          }
-                                          return (
-                                            <CodeBlock className={className}>
-                                              {children}
-                                            </CodeBlock>
-                                          );
-                                        },
-                                      } as Components
-                                    }
-                                  >
-                                    {String((part as { result?: string | object }).result)}
-                                  </ReactMarkdown>
-                                ) : (
-                                  <div>
-                                    {typeof (part as { result?: string | object }).result === 'object' ? (
-                                      <pre className="text-xs text-blue-700 overflow-x-auto whitespace-pre-wrap bg-blue-25 p-2 rounded">
-                                        {JSON.stringify((part as { result?: string | object }).result, null, 2)}
-                                      </pre>
-                                    ) : (
-                                      <ReactMarkdown
-                                        remarkPlugins={[remarkGfm]}
-                                        components={
-                                          {
-                                            code: ({ className, children, ...props }) => {
-                                              const isCodeBlock = className && className.startsWith("language-");
-                                              if (!isCodeBlock) {
+                        <div key={index} className="my-4">
+                          <Accordion.Root type="single" collapsible>
+                            <Accordion.Item
+                              value={toolId}
+                              className="bg-blue-50 border border-blue-200 rounded-lg"
+                            >
+                              <Accordion.Trigger className="w-full flex items-center justify-between p-4 hover:bg-blue-100 transition-colors rounded-lg group">
+                                <div className="flex items-center gap-2">
+                                  <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                                  <span className="text-sm font-medium text-blue-800">
+                                    Tool: {toolName}
+                                  </span>
+                                </div>
+                                <ChevronDown className="w-4 h-4 text-blue-600 transition-transform group-data-[state=open]:rotate-180" />
+                              </Accordion.Trigger>
+                              <Accordion.Content className="px-4 pb-4 border-t border-blue-200">
+                                <div className="mt-3">
+                                  {(part as { result?: string | object })
+                                    .result && (
+                                    <>
+                                      {typeof (
+                                        part as { result?: string | object }
+                                      ).result === "string" ? (
+                                        <ReactMarkdown
+                                          remarkPlugins={[remarkGfm]}
+                                          components={
+                                            {
+                                              code: ({
+                                                className,
+                                                children,
+                                                ...props
+                                              }) => {
+                                                const isCodeBlock =
+                                                  className &&
+                                                  className.startsWith(
+                                                    "language-"
+                                                  );
+                                                if (!isCodeBlock) {
+                                                  return (
+                                                    <code
+                                                      className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                                      {...props}
+                                                    >
+                                                      {children}
+                                                    </code>
+                                                  );
+                                                }
                                                 return (
-                                                  <code
-                                                    className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
-                                                    {...props}
+                                                  <CodeBlock
+                                                    className={className}
                                                   >
                                                     {children}
-                                                  </code>
+                                                  </CodeBlock>
                                                 );
+                                              },
+                                            } as Components
+                                          }
+                                        >
+                                          {String(
+                                            (
+                                              part as {
+                                                result?: string | object;
                                               }
-                                              return (
-                                                <CodeBlock className={className}>
-                                                  {children}
-                                                </CodeBlock>
-                                              );
-                                            },
-                                          } as Components
-                                        }
-                                      >
-                                        {String((part as { result?: string | object }).result)}
-                                      </ReactMarkdown>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
+                                            ).result
+                                          )}
+                                        </ReactMarkdown>
+                                      ) : (
+                                        <div>
+                                          {typeof (
+                                            part as { result?: string | object }
+                                          ).result === "object" ? (
+                                            <pre className="text-xs text-blue-700 overflow-x-auto whitespace-pre-wrap bg-blue-25 p-2 rounded">
+                                              {JSON.stringify(
+                                                (
+                                                  part as {
+                                                    result?: string | object;
+                                                  }
+                                                ).result,
+                                                null,
+                                                2
+                                              )}
+                                            </pre>
+                                          ) : (
+                                            <ReactMarkdown
+                                              remarkPlugins={[remarkGfm]}
+                                              components={
+                                                {
+                                                  code: ({
+                                                    className,
+                                                    children,
+                                                    ...props
+                                                  }) => {
+                                                    const isCodeBlock =
+                                                      className &&
+                                                      className.startsWith(
+                                                        "language-"
+                                                      );
+                                                    if (!isCodeBlock) {
+                                                      return (
+                                                        <code
+                                                          className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                                          {...props}
+                                                        >
+                                                          {children}
+                                                        </code>
+                                                      );
+                                                    }
+                                                    return (
+                                                      <CodeBlock
+                                                        className={className}
+                                                      >
+                                                        {children}
+                                                      </CodeBlock>
+                                                    );
+                                                  },
+                                                } as Components
+                                              }
+                                            >
+                                              {String(
+                                                (
+                                                  part as {
+                                                    result?: string | object;
+                                                  }
+                                                ).result
+                                              )}
+                                            </ReactMarkdown>
+                                          )}
+                                        </div>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                              </Accordion.Content>
+                            </Accordion.Item>
+                          </Accordion.Root>
                           {/* Gradient separator bar */}
-                          {index < (message.parts?.length || 1) - 1 && (
+                          {index < ((message as UIMessageWithParts).parts?.length || 1) - 1 && (
                             <div className="my-6 h-px bg-gradient-to-r from-transparent via-slate-300 to-transparent"></div>
                           )}
                         </div>
@@ -569,66 +749,136 @@ export default function Page() {
 
                     // Handle new AI SDK tool format (tool-{toolName}):
                     if (part.type && part.type.startsWith("tool-")) {
-                      // Extract text content from tool output
-                      let textContent = '';
+                      const toolId = `${message.id}-sdk-tool-${index}`;
+                      const toolName = part.type.replace("tool-", "");
 
-                      if (typeof (part as { output?: unknown }).output === 'string') {
-                        textContent = (part as { output?: string }).output || '';
-                      } else if (Array.isArray((part as { output?: unknown }).output)) {
+                      // Extract text content from tool output
+                      let textContent = "";
+
+                      if (
+                        typeof (part as { output?: unknown }).output ===
+                        "string"
+                      ) {
+                        textContent =
+                          (part as { output?: string }).output || "";
+                      } else if (
+                        Array.isArray((part as { output?: unknown }).output)
+                      ) {
                         // Handle array format like [{"type": "text", "text": "..."}]
-                        textContent = ((part as { output?: Array<{ type: string; text?: string }> }).output || [])
-                          .filter(item => item && typeof item === 'object' && item.type === 'text')
-                          .map(item => item.text || '')
-                          .join('');
-                      } else if ((part as { output?: unknown }).output && typeof (part as { output?: unknown }).output === 'object' && 'text' in ((part as { output?: { text?: string } }).output || {})) {
+                        textContent = (
+                          (
+                            part as {
+                              output?: Array<{ type: string; text?: string }>;
+                            }
+                          ).output || []
+                        )
+                          .filter(
+                            (item) =>
+                              item &&
+                              typeof item === "object" &&
+                              item.type === "text"
+                          )
+                          .map((item) => item.text || "")
+                          .join("");
+                      } else if (
+                        (part as { output?: unknown }).output &&
+                        typeof (part as { output?: unknown }).output ===
+                          "object" &&
+                        (part as { output?: unknown }).output !== null &&
+                        "text" in
+                          ((part as { output?: unknown }).output as object)
+                      ) {
                         // Handle single object format like {"type": "text", "text": "..."}
-                        textContent = String((part as { output?: { text?: string } }).output?.text || '');
-                      } else if ((part as { output?: unknown }).output && typeof (part as { output?: unknown }).output === 'object') {
+                        textContent = String(
+                          (part as { output?: { text?: string } }).output
+                            ?.text || ""
+                        );
+                      } else if (
+                        (part as { output?: unknown }).output &&
+                        typeof (part as { output?: unknown }).output ===
+                          "object"
+                      ) {
                         // Handle raw object output - convert to readable format
                         try {
-                          textContent = JSON.stringify((part as { output?: unknown }).output, null, 2);
+                          textContent = JSON.stringify(
+                            (part as { output?: unknown }).output,
+                            null,
+                            2
+                          );
                         } catch {
-                          textContent = String((part as { output?: unknown }).output);
+                          textContent = String(
+                            (part as { output?: unknown }).output
+                          );
                         }
                       }
 
                       return (
-                        <div key={index}>
-                          {textContent ? (
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              components={
-                                {
-                                  code: ({ className, children, ...props }) => {
-                                    const isCodeBlock = className && className.startsWith("language-");
-                                    if (!isCodeBlock) {
-                                      return (
-                                        <code
-                                          className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
-                                          {...props}
-                                        >
-                                          {children}
-                                        </code>
-                                      );
-                                    }
-                                    return (
-                                      <CodeBlock className={className}>
-                                        {children}
-                                      </CodeBlock>
-                                    );
-                                  },
-                                } as Components
-                              }
+                        <div key={index} className="my-4">
+                          <Accordion.Root type="single" collapsible>
+                            <Accordion.Item
+                              value={toolId}
+                              className="bg-blue-50 border border-blue-200 rounded-lg"
                             >
-                              {textContent}
-                            </ReactMarkdown>
-                          ) : (
-                            <pre className="text-xs text-slate-700 overflow-x-auto whitespace-pre-wrap bg-slate-50 p-2 rounded">
-                              {JSON.stringify((part as { output?: unknown }).output, null, 2)}
-                            </pre>
-                          )}
+                              <Accordion.Trigger className="w-full flex items-center justify-between p-4 hover:bg-blue-100 transition-colors rounded-lg group">
+                                <div className="flex items-center gap-2">
+                                  <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                                  <span className="text-sm font-medium text-blue-800">
+                                    Tool: {toolName}
+                                  </span>
+                                </div>
+                                <ChevronDown className="w-4 h-4 text-blue-600 transition-transform group-data-[state=open]:rotate-180" />
+                              </Accordion.Trigger>
+                              <Accordion.Content className="px-4 pb-4 border-t border-blue-200">
+                                <div className="mt-3">
+                                  {textContent ? (
+                                    <ReactMarkdown
+                                      remarkPlugins={[remarkGfm]}
+                                      components={
+                                        {
+                                          code: ({
+                                            className,
+                                            children,
+                                            ...props
+                                          }) => {
+                                            const isCodeBlock =
+                                              className &&
+                                              className.startsWith("language-");
+                                            if (!isCodeBlock) {
+                                              return (
+                                                <code
+                                                  className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                                  {...props}
+                                                >
+                                                  {children}
+                                                </code>
+                                              );
+                                            }
+                                            return (
+                                              <CodeBlock className={className}>
+                                                {children}
+                                              </CodeBlock>
+                                            );
+                                          },
+                                        } as Components
+                                      }
+                                    >
+                                      {textContent}
+                                    </ReactMarkdown>
+                                  ) : (
+                                    <pre className="text-xs text-slate-700 overflow-x-auto whitespace-pre-wrap bg-slate-50 p-2 rounded">
+                                      {JSON.stringify(
+                                        (part as { output?: unknown }).output,
+                                        null,
+                                        2
+                                      )}
+                                    </pre>
+                                  )}
+                                </div>
+                              </Accordion.Content>
+                            </Accordion.Item>
+                          </Accordion.Root>
                           {/* Gradient separator bar */}
-                          {index < (message.parts?.length || 1) - 1 && (
+                          {index < ((message as UIMessageWithParts).parts?.length || 1) - 1 && (
                             <div className="my-6 h-px bg-gradient-to-r from-transparent via-slate-300 to-transparent"></div>
                           )}
                         </div>
@@ -641,46 +891,55 @@ export default function Page() {
                     }
 
                     // Log truly unhandled parts for debugging, but don't render them
-                    console.log("Unhandled message part:", part);
                     return null;
                   })}
 
                   {/* Fallback for messages without parts or with empty parts */}
-                  {(!message.parts || message.parts.length === 0) && (message as { content?: string | object }).content && (
-                    <div>
-                      {typeof (message as { content?: string | object }).content === 'string' ? (
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={
-                            {
-                              code: ({ className, children, ...props }) => {
-                                const isCodeBlock = className && className.startsWith("language-");
-                                if (!isCodeBlock) {
+                  {(!(message as UIMessageWithParts).parts || (message as UIMessageWithParts).parts?.length === 0) &&
+                    (message as { content?: string | object }).content && (
+                      <div>
+                        {typeof (message as { content?: string | object })
+                          .content === "string" ? (
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={
+                              {
+                                code: ({ className, children, ...props }) => {
+                                  const isCodeBlock =
+                                    className &&
+                                    className.startsWith("language-");
+                                  if (!isCodeBlock) {
+                                    return (
+                                      <code
+                                        className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
+                                        {...props}
+                                      >
+                                        {children}
+                                      </code>
+                                    );
+                                  }
                                   return (
-                                    <code
-                                      className="bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-sm font-mono"
-                                      {...props}
-                                    >
+                                    <CodeBlock className={className}>
                                       {children}
-                                    </code>
+                                    </CodeBlock>
                                   );
-                                }
-                                return (
-                                  <CodeBlock className={className}>
-                                    {children}
-                                  </CodeBlock>
-                                );
-                              },
-                            } as Components
-                          }
-                        >
-                          {String((message as { content?: string | object }).content)}
-                        </ReactMarkdown>
-                      ) : (
-                        <p>{String((message as { content?: string | object }).content)}</p>
-                      )}
-                    </div>
-                  )}
+                                },
+                              } as Components
+                            }
+                          >
+                            {String(
+                              (message as { content?: string | object }).content
+                            )}
+                          </ReactMarkdown>
+                        ) : (
+                          <p>
+                            {String(
+                              (message as { content?: string | object }).content
+                            )}
+                          </p>
+                        )}
+                      </div>
+                    )}
                 </div>
               </div>
             </div>
@@ -738,9 +997,7 @@ export default function Page() {
         >
           <div className="max-w-4xl mx-auto flex items-center justify-between">
             <div>
-              <h1 className="text-xl font-semibold text-slate-800">
-                AI Assistant
-              </h1>
+              <h1 className="text-xl font-semibold text-slate-800">Nexus AI</h1>
               {messageQueue.length > 0 && (
                 <p className="text-sm text-slate-500 mt-1">
                   {messageQueue.length} message
@@ -749,6 +1006,19 @@ export default function Page() {
               )}
             </div>
             <div className="flex items-center gap-2">
+              <button
+                onClick={() => setUseOpenAI(!useOpenAI)}
+                className={`px-3 py-1 rounded-lg text-xs font-medium transition-all duration-200 ${
+                  useOpenAI
+                    ? "bg-green-100 text-green-700 hover:bg-green-200"
+                    : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+                }`}
+                title={`Currently using: ${
+                  useOpenAI ? "OpenAI Native" : "AI SDK"
+                }`}
+              >
+                {useOpenAI ? "OpenAI" : "AI SDK"}
+              </button>
               <button
                 onClick={async () => {
                   if (!showMCPConfig) {
@@ -804,7 +1074,10 @@ export default function Page() {
                   {/* Server list skeleton */}
                   <div className="space-y-3">
                     {Array.from({ length: 3 }).map((_, index) => (
-                      <div key={index} className="border rounded-lg p-4 bg-white">
+                      <div
+                        key={index}
+                        className="border rounded-lg p-4 bg-white"
+                      >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
                             <div className="w-5 h-5 bg-slate-300 rounded animate-pulse"></div>

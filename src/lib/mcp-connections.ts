@@ -39,5 +39,13 @@ class MCPConnectionManager {
     }
 }
 
-// Export a singleton instance
-export const mcpConnectionManager = new MCPConnectionManager();
+// Export a singleton instance that persists across hot reloads
+declare global {
+    var __mcpConnectionManager: MCPConnectionManager | undefined;
+}
+
+export const mcpConnectionManager = globalThis.__mcpConnectionManager ?? new MCPConnectionManager();
+
+if (process.env.NODE_ENV !== 'production') {
+    globalThis.__mcpConnectionManager = mcpConnectionManager;
+}

@@ -1,6 +1,62 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { MCPToolCall } from '@/types/mcp';
-import { mcpConnectionManager } from '@/lib/mcp-connections';
+import { MCPToolCall, MCPServer } from '@/types/mcp';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { MCPDatabase } from '@/lib/database';
+
+async function createMCPConnection(server: MCPServer): Promise<Client> {
+    if (server.config.transport === 'sse') {
+        if (!server.config.url) {
+            throw new Error('URL is required for SSE transport');
+        }
+
+        const transport = new SSEClientTransport(
+            new URL(server.config.url),
+            {
+                requestInit: {
+                    headers: server.config.headers || {}
+                }
+            }
+        );
+
+        const client = new Client(
+            { name: 'personal-ai-client', version: '1.0.0' },
+            { capabilities: { tools: {} } }
+        );
+
+        const connectPromise = client.connect(transport);
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('SSE connection timeout')), 10000)
+        );
+
+        await Promise.race([connectPromise, timeoutPromise]);
+        return client;
+
+    } else if (server.config.transport === 'stdio' && server.config.command) {
+        const transport = new StdioClientTransport({
+            command: server.config.command,
+            args: server.config.args || [],
+            env: server.config.env || {}
+        });
+
+        const client = new Client(
+            { name: 'personal-ai-client', version: '1.0.0' },
+            { capabilities: { tools: {} } }
+        );
+
+        const connectPromise = client.connect(transport);
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('STDIO connection timeout')), 10000)
+        );
+
+        await Promise.race([connectPromise, timeoutPromise]);
+        return client;
+
+    } else {
+        throw new Error('Invalid server configuration');
+    }
+}
 
 export async function POST(request: NextRequest) {
     try {
@@ -13,32 +69,38 @@ export async function POST(request: NextRequest) {
             );
         }
 
-        // Get the active connection for this server
-        const connection = mcpConnectionManager.getConnection(serverId);
+        console.log('=== MCP LAMBDA EXECUTE DEBUG ===');
+        console.log('Tool name:', toolName);
+        console.log('Server ID:', serverId);
+        console.log('Arguments:', toolArgs);
 
-        if (!connection) {
-            // No active connection found - user needs to test connection first
+        // Get server configuration from database
+        const server = MCPDatabase.getServer(serverId);
+        if (!server) {
             return NextResponse.json(
-                { error: 'No active connection found for server. Please test connection first to establish a connection.' },
-                { status: 400 }
+                { error: `Server with ID ${serverId} not found` },
+                { status: 404 }
             );
         }
 
+        let client: Client | null = null;
+
         try {
-            // Execute the tool using the MCP client
-            const result = await connection.client.callTool({
+            // Create connection on-demand (lambda-style)
+            console.log(`Creating on-demand connection to ${server.name} (${server.config.transport})`);
+            client = await createMCPConnection(server);
+            console.log(`Connection established successfully for ${server.name}`);
+
+            // Execute the tool
+            const result = await client.callTool({
                 name: toolName,
                 arguments: toolArgs
             });
 
-            // Log the raw result for debugging
-            console.log('=== MCP TOOL EXECUTION DEBUG ===');
+            console.log('=== MCP TOOL EXECUTION SUCCESS ===');
             console.log('Tool name:', toolName);
-            console.log('Server ID:', serverId);
-            console.log('Raw result:', JSON.stringify(result, null, 2));
+            console.log('Server:', server.name);
             console.log('Result content:', JSON.stringify(result.content, null, 2));
-            console.log('Result type:', typeof result);
-            console.log('Content type:', typeof result.content);
 
             return NextResponse.json({
                 success: true,
@@ -50,15 +112,6 @@ export async function POST(request: NextRequest) {
         } catch (toolError) {
             console.error('Tool execution error:', toolError);
 
-            // If the connection is broken, remove it from active connections
-            if (toolError instanceof Error && (
-                toolError.message.includes('connection') ||
-                toolError.message.includes('closed') ||
-                toolError.message.includes('disconnected')
-            )) {
-                mcpConnectionManager.deleteConnection(serverId);
-            }
-
             return NextResponse.json(
                 {
                     error: 'Tool execution failed: ' + (toolError instanceof Error ? toolError.message : 'Unknown error'),
@@ -66,6 +119,17 @@ export async function POST(request: NextRequest) {
                 },
                 { status: 400 }
             );
+
+        } finally {
+            // Clean up connection (or keep it alive for conversation duration if needed)
+            if (client) {
+                try {
+                    await client.close();
+                    console.log(`Connection closed for ${server.name}`);
+                } catch (closeError) {
+                    console.warn('Error closing connection:', closeError);
+                }
+            }
         }
 
     } catch (error) {

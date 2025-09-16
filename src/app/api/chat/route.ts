@@ -1,5 +1,5 @@
 import { openai } from '@ai-sdk/openai';
-import { streamText, UIMessage, tool } from 'ai';
+import { streamText, UIMessage, tool, NoSuchToolError, InvalidToolInputError, stepCountIs } from 'ai';
 import { MCPServer } from '@/types/mcp';
 import { z } from 'zod';
 import { MCPDatabase } from '@/lib/database';
@@ -51,13 +51,9 @@ function getMCPServers(): MCPServer[] {
 export async function POST(req: Request) {
   const { messages, mcpServers }: { messages: UIMessage[]; mcpServers?: MCPServer[] } = await req.json();
 
-  // Debug logging
-  console.log('=== CHAT API DEBUG ===');
-  console.log('Received messages:', JSON.stringify(messages, null, 2));
-  console.log('Number of messages:', messages?.length || 0);
 
   // Convert UI messages to the format expected by the AI SDK
-  const modelMessages = messages.map(msg => {
+  const modelMessages = messages.map((msg) => {
     let content = '';
     const msgWithContent = msg as { content?: string | Array<unknown>; parts?: Array<{ type: string; text?: string }> };
 
@@ -82,6 +78,7 @@ export async function POST(req: Request) {
     else {
       content = String(msgWithContent.content || '');
     }
+
 
     return {
       id: msg.id,
@@ -123,48 +120,16 @@ Be conversational, helpful, and provide comprehensive responses when appropriate
       const toolName = mcpTool.name;
 
       // Enhance descriptions with context about when to use the tool
-      let enhancedDescription = mcpTool.description;
-      if (!enhancedDescription) {
-        // Provide fallback descriptions based on tool names for better AI understanding
-        if (toolName.includes('search') || toolName.includes('docs')) {
-          enhancedDescription = `Search and retrieve information from ${server.name} documentation`;
-        } else if (toolName.includes('get') && toolName.includes('price')) {
-          enhancedDescription = `Get current market price information for stocks and securities`;
-        } else if (toolName.includes('order')) {
-          enhancedDescription = `Execute trading orders for buying or selling securities`;
-        } else if (toolName.includes('holdings')) {
-          enhancedDescription = `Display portfolio holdings and investment information`;
-        } else if (toolName.includes('add') && server.name.toLowerCase().includes('zerodha')) {
-          enhancedDescription = `Perform mathematical addition operations`;
-        } else if (toolName.includes('profile')) {
-          enhancedDescription = `Retrieve user account and profile information`;
-        } else {
-          enhancedDescription = `Access ${toolName.replace(/[-_]/g, ' ')} functionality from ${server.name}`;
-        }
-      }
+      const enhancedDescription = mcpTool.description;
 
       return {
         [toolName]: tool({
           description: enhancedDescription,
           inputSchema: mcpSchemaToZod(mcpTool.inputSchema as Record<string, unknown>),
-          execute: async (args: Record<string, unknown>) => {
+          execute: async (args: Record<string, unknown>, { abortSignal }) => {
             try {
-              // First, ensure the connection is established
+              // Execute tool directly (lambda-style - no pre-connection needed)
               const baseUrl = `${req.headers.get('x-forwarded-proto') || 'http'}://${req.headers.get('host')}`;
-              const testConnectionUrl = `${baseUrl}/api/mcp/test-connection`;
-
-              // Test connection to ensure it's active
-              const connectionResponse = await fetch(testConnectionUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(server)
-              });
-
-              if (!connectionResponse.ok) {
-                return { error: `Failed to establish MCP connection: ${connectionResponse.status}` };
-              }
-
-              // Now execute the tool
               const executeUrl = `${baseUrl}/api/mcp/execute`;
               const response = await fetch(executeUrl, {
                 method: 'POST',
@@ -173,8 +138,9 @@ Be conversational, helpful, and provide comprehensive responses when appropriate
                   toolName: mcpTool.name,
                   arguments: args,
                   serverId: server.id
-                })
-              });
+                }),
+                signal: abortSignal as AbortSignal
+              } as RequestInit);
 
               if (!response.ok) {
                 throw new Error(`MCP tool execution failed: ${response.statusText}`);
@@ -204,18 +170,50 @@ Be conversational, helpful, and provide comprehensive responses when appropriate
 
 ${connectedServers.length > 0 ? `You have access to ${connectedServers.length} MCP server(s) with ${Object.keys(toolsObject).length} specialized tools available. Use these tools intelligently when they can help answer the user's question or fulfill their request.` : ''}
 
-You are equipped with various tools that can help you provide more accurate and up-to-date information. Use your judgment to determine when a tool would be helpful for answering a user's question.`;
+You are equipped with various tools that can help you provide more accurate and up-to-date information. Use your judgment to determine when a tool would be helpful for answering a user's question.
 
-  // Use AI SDK with dynamic tools
+CRITICAL CONVERSATION FLOW REQUIREMENT:
+When you execute a tool, you are in the middle of a conversation, NOT at the end. After every tool execution:
+
+1. FIRST: Execute the appropriate tool(s)
+2. THEN: Always continue the conversation by providing your own analysis
+
+MANDATORY FOLLOW-UP: After using any tool, you MUST continue with text that:
+- Summarizes the tool results in plain language
+- Analyzes what the data means for the user
+- Provides insights and interpretation
+- Explains the significance of the results
+- Connects the results back to the user's original question
+
+This is a conversational requirement - tool execution is NEVER the end of your response. You must always provide commentary and analysis after tool results.`;
+
+  // Use AI SDK with dynamic tools and multi-step calls
   const result = streamText({
     model: openai('gpt-4'),
     system: enhancedSystemPrompt,
     messages: modelMessages, // Use properly converted messages
     tools: Object.keys(toolsObject).length > 0 ? toolsObject : undefined,
-    toolChoice: 'auto', // Ensure the model can use tools but still generates text
+    toolChoice: 'auto',
+    stopWhen: stepCountIs(5), // Allow up to 5 steps for tool calls + analysis
+    onStepFinish: (step) => {
+      console.log('Step finished:', {
+        finishReason: step.finishReason,
+        hasToolCalls: step.toolCalls.length > 0,
+        hasToolResults: step.toolResults.length > 0,
+        textLength: step.text?.length || 0
+      });
+    }
   });
-
   return result.toUIMessageStreamResponse({
     sendReasoning: true,
+    onError: error => {
+      if (NoSuchToolError.isInstance(error)) {
+        return 'The model tried to call a unknown tool.';
+      } else if (InvalidToolInputError.isInstance(error)) {
+        return 'The model called a tool with invalid inputs.';
+      } else {
+        return 'An unknown error occurred.';
+      }
+    },
   });
 }

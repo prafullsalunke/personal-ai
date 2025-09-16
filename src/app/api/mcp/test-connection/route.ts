@@ -11,6 +11,12 @@ export async function POST(request: NextRequest) {
     try {
         const server: MCPServer = await request.json();
 
+        if (!server || !server.config) {
+            return NextResponse.json({
+                error: 'Invalid server configuration - missing config'
+            }, { status: 400 });
+        }
+
         if (server.config.transport === 'sse') {
             // For SSE servers, use MCP SSE client
             try {
