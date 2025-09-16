@@ -72,7 +72,6 @@ export async function POST(request: NextRequest) {
         console.log('=== MCP LAMBDA EXECUTE DEBUG ===');
         console.log('Tool name:', toolName);
         console.log('Server ID:', serverId);
-        console.log('Arguments:', toolArgs);
 
         // Get server configuration from database
         const server = MCPDatabase.getServer(serverId);
@@ -100,7 +99,6 @@ export async function POST(request: NextRequest) {
             console.log('=== MCP TOOL EXECUTION SUCCESS ===');
             console.log('Tool name:', toolName);
             console.log('Server:', server.name);
-            console.log('Result content:', JSON.stringify(result.content, null, 2));
 
             return NextResponse.json({
                 success: true,

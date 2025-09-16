@@ -87,7 +87,6 @@ export async function POST(req: Request) {
     };
   });
 
-  console.log('Converted model messages:', JSON.stringify(modelMessages, null, 2));
 
   // Get available MCP servers
   const servers = mcpServers || getMCPServers();
@@ -164,7 +163,6 @@ Be conversational, helpful, and provide comprehensive responses when appropriate
     ...dynamicTools.reduce((acc, toolObj) => ({ ...acc, ...toolObj }), {})
   };
 
-  console.log('Available tools:', Object.keys(toolsObject));
 
   const enhancedSystemPrompt = `${systemPrompt}
 
@@ -195,13 +193,8 @@ This is a conversational requirement - tool execution is NEVER the end of your r
     tools: Object.keys(toolsObject).length > 0 ? toolsObject : undefined,
     toolChoice: 'auto',
     stopWhen: stepCountIs(5), // Allow up to 5 steps for tool calls + analysis
-    onStepFinish: (step) => {
-      console.log('Step finished:', {
-        finishReason: step.finishReason,
-        hasToolCalls: step.toolCalls.length > 0,
-        hasToolResults: step.toolResults.length > 0,
-        textLength: step.text?.length || 0
-      });
+    onStepFinish: () => {
+      console.log('Step finished:');
     }
   });
   return result.toUIMessageStreamResponse({

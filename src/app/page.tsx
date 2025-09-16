@@ -1185,7 +1185,7 @@ export default function Page() {
               )}
 
               {/* Modern Skeleton Loading */}
-              {status !== "ready" && !error && (
+              {status === "loading" && !error && (
                 <div className="px-4 py-6 md:px-6 md:py-8 bg-slate-50/80">
                   <TypingIndicator />
                 </div>
