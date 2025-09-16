@@ -36,9 +36,8 @@ body {
 
 .prose pre {
   background: #f8fafc;
-  border: 1px solid #e2e8f0;
   border-radius: 8px;
-  padding: 16px;
+  margin-bottom: 16px;
   overflow-x: auto;
   font-size: 14px;
   white-space: pre-wrap;
@@ -106,6 +105,9 @@ body {
 
 .prose ol {
   list-style-type: decimal;
+}
+.prose ol li::marker {
+  font-weight: bold;
 }
 
 .prose li {
@@ -193,4 +195,20 @@ body {
 .custom-scrollbar {
   scrollbar-width: thin;
   scrollbar-color: #cbd5e1 #f1f5f9;
+}
+
+/* Fade-in animation for text replacement */
+@keyframes fade-in {
+  0% {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.6s ease-out;
 }
